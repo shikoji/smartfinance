@@ -1,18 +1,29 @@
 // SmartFinance Pro
 // Substitua o arquivo lib/main.dart por este código.
-// Antes de rodar, execute: flutter pub add shared_preferences
+// Antes de rodar, execute: flutter pub add firebase_core firebase_auth cloud_firestore
 
-import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'firebase_options.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final repository = LocalRepository();
-  final database = await repository.load();
-  runApp(SmartFinanceApp(controller: AppController(repository, database)));
+
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
+  final repository = FirebaseRepository();
+  final database = AppDatabase(users: {});
+  final controller = AppController(repository, database);
+
+  await controller.tryRestoreSession();
+
+  runApp(SmartFinanceApp(controller: controller));
 }
 
 /* ============================================================
@@ -290,7 +301,6 @@ class FinanceUser {
 
   Map<String, dynamic> toJson() => {
         'email': email,
-        'password': password,
         'name': name,
         'initialBalance': initialBalance,
         'monthlyLimit': monthlyLimit,
@@ -489,176 +499,128 @@ class MonthStats {
 }
 
 /* ============================================================
-   REPOSITÓRIO LOCAL
+   REPOSITÓRIO FIREBASE
 ============================================================ */
 
-class LocalRepository {
-  static const String storageKey = 'smartfinance_pro_local_v1';
+class FirebaseRepository {
+  FirebaseRepository();
 
-  Future<AppDatabase> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(storageKey);
-    if (raw == null || raw.trim().isEmpty) return seedDatabase();
+  final FirebaseAuth auth = FirebaseAuth.instance;
+  final FirebaseFirestore firestore = FirebaseFirestore.instance;
 
-    try {
-      final decoded = jsonDecode(raw) as Map<String, dynamic>;
-      final db = AppDatabase.fromJson(decoded);
-      if (db.users.isEmpty) return seedDatabase();
-      return db;
-    } catch (_) {
-      return seedDatabase();
-    }
+  String? get currentUid => auth.currentUser?.uid;
+
+  DocumentReference<Map<String, dynamic>> _userDoc(String uid) {
+    return firestore.collection('users').doc(uid);
   }
 
-  Future<void> save(AppDatabase database) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(storageKey, jsonEncode(database.toJson()));
+  FinanceUser _blankUserFromFirebase(User firebaseUser) {
+    final email = firebaseUser.email?.trim().toLowerCase() ?? '';
+    return FinanceUser(
+      email: email,
+      password: '',
+      name: firebaseUser.displayName ?? 'Usuário',
+      initialBalance: 0,
+      monthlyLimit: 1800,
+      categories: List<String>.from(defaultCategories),
+      defaultCategoryBudgets: Map<String, double>.from(defaultBudgets),
+      transactions: [],
+      goals: [],
+      recurringEntries: [],
+      monthBudgets: {
+        monthKey(DateTime.now()): Map<String, double>.from(defaultBudgets),
+      },
+      notesByMonth: {},
+    );
   }
 
-  Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(storageKey);
-  }
-}
+  Future<FinanceUser?> loadCurrentUser() async {
+    final firebaseUser = auth.currentUser;
+    if (firebaseUser == null) return null;
 
-AppDatabase seedDatabase() {
-  final demo = createDemoUser();
-  return AppDatabase(users: {demo.email: demo});
-}
-
-FinanceUser createDemoUser() {
-  final now = DateTime.now();
-  final transactions = <MoneyTransaction>[];
-  final budgets = <String, Map<String, double>>{};
-
-  final random = Random(4);
-  for (int i = 7; i >= 0; i--) {
-    final m = DateTime(now.year, now.month - i, 1);
-    final key = monthKey(m);
-    budgets[key] = Map<String, double>.from(defaultBudgets);
-
-    final baseIncome = 1450.0 + random.nextInt(350);
-    transactions.add(MoneyTransaction(
-      id: generateId(),
-      amount: baseIncome,
-      category: 'Trabalho',
-      description: 'Bolsa/entrada principal',
-      isIncome: true,
-      date: safeDayInMonth(m, 5),
-      tag: 'fixo',
-    ));
-    if (i % 2 == 0) {
-      transactions.add(MoneyTransaction(
-        id: generateId(),
-        amount: 180.0 + random.nextInt(160),
-        category: 'Trabalho',
-        description: 'Freela ou ajuda extra',
-        isIncome: true,
-        date: safeDayInMonth(m, 18),
-        tag: 'extra',
-      ));
+    final doc = await _userDoc(firebaseUser.uid).get();
+    if (doc.exists && doc.data() != null) {
+      return FinanceUser.fromJson(doc.data()!);
     }
 
-    final expenses = <String, double>{
-      'Moradia': 320 + random.nextInt(120).toDouble(),
-      'Comida': 330 + random.nextInt(210).toDouble(),
-      'Transporte': 120 + random.nextInt(120).toDouble(),
-      'Estudos': 50 + random.nextInt(120).toDouble(),
-      'Lazer': 60 + random.nextInt(180).toDouble(),
-      'Compras': 70 + random.nextInt(240).toDouble(),
-      'Saúde': 20 + random.nextInt(120).toDouble(),
-      'Assinaturas': 59.90 + random.nextInt(50).toDouble(),
-      'Caixinhas': 120 + random.nextInt(220).toDouble(),
-      'Outros': 40 + random.nextInt(120).toDouble(),
-    };
+    final user = _blankUserFromFirebase(firebaseUser);
+    if (user.email.isEmpty) return null;
 
-    int day = 2;
-    for (final entry in expenses.entries) {
-      transactions.add(MoneyTransaction(
-        id: generateId(),
-        amount: entry.value,
-        category: entry.key,
-        description: descriptionFor(entry.key),
-        isIncome: false,
-        date: safeDayInMonth(m, day),
-        tag: entry.key == 'Assinaturas' ? 'recorrente' : '',
-      ));
-      day += 3;
-    }
+    await saveUser(user);
+    return user;
   }
 
-  return FinanceUser(
-    email: 'teste@gmail.com',
-    password: '123456',
-    name: 'Usuário Teste',
-    initialBalance: 850,
-    monthlyLimit: 2200,
-    categories: List<String>.from(defaultCategories),
-    defaultCategoryBudgets: Map<String, double>.from(defaultBudgets),
-    transactions: transactions,
-    goals: [
-      Goal(
-        id: generateId(),
-        name: 'Notebook',
-        target: 3500,
-        saved: 1450,
-        deadline: DateTime(now.year, now.month + 7, 1),
-        monthlyPlan: 300,
-        iconKey: 'computer',
-      ),
-      Goal(
-        id: generateId(),
-        name: 'Reserva de emergência',
-        target: 2500,
-        saved: 920,
-        deadline: DateTime(now.year, now.month + 10, 1),
-        monthlyPlan: 180,
-        iconKey: 'health',
-      ),
-      Goal(
-        id: generateId(),
-        name: 'Viagem',
-        target: 1800,
-        saved: 410,
-        deadline: DateTime(now.year, now.month + 5, 1),
-        monthlyPlan: 220,
-        iconKey: 'flight',
-      ),
-    ],
-    recurringEntries: [
-      RecurringEntry(
-        id: generateId(),
-        name: 'Internet',
-        amount: 89.90,
-        category: 'Assinaturas',
-        isIncome: false,
-        dayOfMonth: 10,
-        active: true,
-      ),
-      RecurringEntry(
-        id: generateId(),
-        name: 'Spotify/streaming',
-        amount: 21.90,
-        category: 'Assinaturas',
-        isIncome: false,
-        dayOfMonth: 15,
-        active: true,
-      ),
-      RecurringEntry(
-        id: generateId(),
-        name: 'Guardar na reserva',
-        amount: 180,
-        category: 'Caixinhas',
-        isIncome: false,
-        dayOfMonth: 6,
-        active: true,
-      ),
-    ],
-    monthBudgets: budgets,
-    notesByMonth: {
-      monthKey(now): 'Foco do mês: reduzir gastos com comida e manter as caixinhas em dia.',
-    },
-  );
+  Future<FinanceUser?> login({
+    required String email,
+    required String password,
+  }) async {
+    final credential = await auth.signInWithEmailAndPassword(
+      email: email.trim().toLowerCase(),
+      password: password.trim(),
+    );
+
+    final firebaseUser = credential.user;
+    if (firebaseUser == null) return null;
+
+    final doc = await _userDoc(firebaseUser.uid).get();
+    if (doc.exists && doc.data() != null) {
+      return FinanceUser.fromJson(doc.data()!);
+    }
+
+    final user = _blankUserFromFirebase(firebaseUser);
+    if (user.email.isEmpty) return null;
+
+    await saveUser(user);
+    return user;
+  }
+
+  Future<FinanceUser> register({
+    required String name,
+    required String email,
+    required String password,
+    required double initialBalance,
+  }) async {
+    final credential = await auth.createUserWithEmailAndPassword(
+      email: email.trim().toLowerCase(),
+      password: password.trim(),
+    );
+
+    final firebaseUser = credential.user!;
+    final normalized = firebaseUser.email?.trim().toLowerCase() ?? email.trim().toLowerCase();
+
+    final user = FinanceUser(
+      email: normalized,
+      password: '',
+      name: name.trim().isEmpty ? 'Usuário' : name.trim(),
+      initialBalance: initialBalance,
+      monthlyLimit: 1800,
+      categories: List<String>.from(defaultCategories),
+      defaultCategoryBudgets: Map<String, double>.from(defaultBudgets),
+      transactions: [],
+      goals: [],
+      recurringEntries: [],
+      monthBudgets: {
+        monthKey(DateTime.now()): Map<String, double>.from(defaultBudgets),
+      },
+      notesByMonth: {},
+    );
+
+    await firebaseUser.updateDisplayName(user.name);
+    await saveUser(user);
+
+    return user;
+  }
+
+  Future<void> saveUser(FinanceUser user) async {
+    final uid = currentUid;
+    if (uid == null) return;
+
+    await _userDoc(uid).set(user.toJson(), SetOptions(merge: true));
+  }
+
+  Future<void> logout() async {
+    await auth.signOut();
+  }
 }
 
 String descriptionFor(String category) {
@@ -693,7 +655,7 @@ String descriptionFor(String category) {
 class AppController extends ChangeNotifier {
   AppController(this.repository, this.database);
 
-  final LocalRepository repository;
+  final FirebaseRepository repository;
   AppDatabase database;
   String? currentEmail;
   DateTime selectedMonth = monthStart(DateTime.now());
@@ -703,19 +665,42 @@ class AppController extends ChangeNotifier {
 
   bool get isLoggedIn => currentUser != null;
 
-  Future<void> persist() async {
-    await repository.save(database);
+  Future<void> tryRestoreSession() async {
+    final user = await repository.loadCurrentUser();
+    if (user == null) return;
+
+    database.users[user.email] = user;
+    currentEmail = user.email;
     notifyListeners();
   }
 
-  bool login(String email, String password) {
-    final normalized = email.trim().toLowerCase();
-    final user = database.users[normalized];
-    if (user == null) return false;
-    if (user.password != password.trim()) return false;
-    currentEmail = normalized;
+  Future<void> persist() async {
+    final user = currentUser;
+    if (user != null) {
+      await repository.saveUser(user);
+    }
     notifyListeners();
-    return true;
+  }
+
+  Future<bool> login(String email, String password) async {
+    try {
+      final user = await repository.login(
+        email: email,
+        password: password,
+      );
+
+      if (user == null) return false;
+
+      database.users[user.email] = user;
+      currentEmail = user.email;
+
+      notifyListeners();
+      return true;
+    } on FirebaseAuthException {
+      return false;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<String?> register({
@@ -725,34 +710,51 @@ class AppController extends ChangeNotifier {
     required double initialBalance,
   }) async {
     final normalized = email.trim().toLowerCase();
+
     if (!normalized.contains('@') || !normalized.contains('.')) {
       return 'Digite um email válido.';
     }
-    if (password.trim().length < 4) {
-      return 'A senha precisa ter pelo menos 4 caracteres.';
-    }
-    if (database.users.containsKey(normalized)) return 'Este email já existe.';
 
-    database.users[normalized] = FinanceUser(
-      email: normalized,
-      password: password.trim(),
-      name: name.trim().isEmpty ? 'Usuário' : name.trim(),
-      initialBalance: initialBalance,
-      monthlyLimit: 1800,
-      categories: List<String>.from(defaultCategories),
-      defaultCategoryBudgets: Map<String, double>.from(defaultBudgets),
-      transactions: [],
-      goals: [],
-      recurringEntries: [],
-      monthBudgets: {monthKey(DateTime.now()): Map<String, double>.from(defaultBudgets)},
-      notesByMonth: {},
-    );
-    await persist();
-    return null;
+    if (password.trim().length < 6) {
+      return 'A senha precisa ter pelo menos 6 caracteres.';
+    }
+
+    try {
+      final user = await repository.register(
+        name: name,
+        email: normalized,
+        password: password,
+        initialBalance: initialBalance,
+      );
+
+      database.users[user.email] = user;
+      currentEmail = user.email;
+
+      notifyListeners();
+      return null;
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'email-already-in-use') {
+        return 'Este email já está cadastrado.';
+      }
+
+      if (e.code == 'weak-password') {
+        return 'A senha está fraca. Use pelo menos 6 caracteres.';
+      }
+
+      if (e.code == 'invalid-email') {
+        return 'Email inválido.';
+      }
+
+      return 'Erro ao criar conta: ${e.code}';
+    } catch (_) {
+      return 'Erro ao criar conta.';
+    }
   }
 
-  void logout() {
+  Future<void> logout() async {
+    await repository.logout();
     currentEmail = null;
+    database = AppDatabase(users: {});
     notifyListeners();
   }
 
@@ -967,28 +969,6 @@ class AppController extends ChangeNotifier {
     return created;
   }
 
-  Future<void> resetDemo() async {
-    database = seedDatabase();
-    currentEmail = 'teste@gmail.com';
-    selectedMonth = monthStart(DateTime.now());
-    await persist();
-  }
-
-  Future<String?> importJson(String raw) async {
-    try {
-      final decoded = jsonDecode(raw) as Map<String, dynamic>;
-      database = AppDatabase.fromJson(decoded);
-      if (database.users.isEmpty) return 'O JSON não possui usuários.';
-      currentEmail = database.users.keys.first;
-      await persist();
-      return null;
-    } catch (e) {
-      return 'JSON inválido.';
-    }
-  }
-
-  String exportJson() => const JsonEncoder.withIndent('  ').convert(database.toJson());
-
   List<String> insightsForSelectedMonth() {
     final current = statsFor(selectedMonth);
     final previous = statsFor(previousMonth(selectedMonth));
@@ -1104,8 +1084,8 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
-  final email = TextEditingController(text: 'teste@gmail.com');
-  final password = TextEditingController(text: '123456');
+  final email = TextEditingController();
+  final password = TextEditingController();
   bool visible = false;
 
   @override
@@ -1115,8 +1095,11 @@ class _LoginPageState extends State<LoginPage> {
     super.dispose();
   }
 
-  void submit() {
-    final ok = widget.controller.login(email.text, password.text);
+  Future<void> submit() async {
+    final ok = await widget.controller.login(email.text, password.text);
+
+    if (!mounted) return;
+
     if (!ok) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Email ou senha incorretos.')),
@@ -1181,20 +1164,6 @@ class _LoginPageState extends State<LoginPage> {
                         ),
                       ),
                       onSubmitted: (_) => submit(),
-                    ),
-                    const SizedBox(height: 10),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: kBlue.withValues(alpha: 0.08),
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: const Text(
-                        'Conta teste: teste@gmail.com / 123456',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(fontWeight: FontWeight.w700, color: kBlue),
-                      ),
                     ),
                     const SizedBox(height: 18),
                     SizedBox(
@@ -1268,7 +1237,7 @@ class _RegisterPageState extends State<RegisterPage> {
     }
     Navigator.pop(context);
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Conta criada. Faça login.')),
+      const SnackBar(content: Text('Conta criada com sucesso. Você já está logado.')),
     );
   }
 
@@ -3483,7 +3452,7 @@ class SettingsScreen extends StatelessWidget {
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
-                  onPressed: controller.logout,
+                  onPressed: () async { await controller.logout(); },
                   icon: const Icon(Icons.logout),
                   label: const Text('Sair da conta'),
                 ),

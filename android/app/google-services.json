@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "578546980473",
+    "project_id": "smartfinance-1dc0a",
+    "storage_bucket": "smartfinance-1dc0a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:578546980473:android:78ec235825c4560ee366a8",
+        "android_client_info": {
+          "package_name": "com.example.smartfinance"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "578546980473-nuldtdntual1fq920sf0ti4vbee9ppsc.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAEHSE8LpSiGNAit9d_qynp61lWwQxYdEY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "578546980473-gme22q3sib1il2q3p397u5crde26go4r.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
